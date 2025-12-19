@@ -1,0 +1,67 @@
+## Package Base Information
+name: app-n100_sdk_coremark
+owner: nuclei
+version:
+description: Coremark Benchmark
+type: app
+keywords:
+  - baremetal
+  - benchmark
+category: baremetal application
+license: Apache-2.0
+homepage: https://www.eembc.org/coremark/
+
+## Package Dependency
+dependencies:
+  - name: sdk-n100_sdk
+    version:
+
+## Package Configurations
+configuration:
+  cpu_series:
+    default_value: 100
+    type: choice
+    description: Select Benchmark Options
+    choices:
+      - name: 100
+        description: Options for Nuclei 100 Series
+
+## Set Configuration for other packages
+setconfig:
+  - config: stdclib
+    value: newlib_small
+
+## Source Code Management
+codemanage:
+  copyfiles:
+    - path: ["*.c", "*.h"]
+  incdirs:
+    - path: ["./"]
+  libdirs:
+  ldlibs:
+
+## Build Configuration
+buildconfig:
+  - type: common
+    cdefines:
+      - defines: FLAGS_STR=\""See compiler options passed in IDE"\"
+      - defines: ITERATIONS=15
+      - defines: PERFORMANCE_RUN=1
+  - type: gcc
+    common_flags: # flags need to be combined together across all packages
+      - flags: >-
+              -Ofast -fno-code-hoisting -fno-tree-vectorize -finline-functions -falign-functions=4
+              -falign-jumps=4 -falign-loops=4 -finline-limit=200 -fselective-scheduling -funroll-loops
+
+        condition: $( ${cpu_series} == 100 )
+  - type: clang
+    common_flags: # flags need to be combined together across all packages
+      - flags: -O3 -flto -falign-functions=4 -falign-loops=4
+    ldflags:
+      - flags: -Wl,-mllvm,--align-all-nofallthru-blocks=2
+  - type: zcc
+    common_flags: # flags need to be combined together across all packages
+      - flags: -O3 -flto -falign-functions=4 -falign-loops=4 -flate-loop-unroll -malign-branch
+    ldflags:
+      - flags: -Wl,-mllvm,--align-all-nofallthru-blocks=2 -fuse-size-lib
+

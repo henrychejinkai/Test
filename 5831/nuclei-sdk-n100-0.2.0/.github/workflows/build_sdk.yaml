@@ -1,0 +1,116 @@
+name: Build SDK
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    paths:
+        - ".github/build_sdk.yaml"
+        - "Build/**"
+        - "application/**"
+        - "NMSIS/**"
+        - "OS/**"
+        - "SoC/**"
+        - "test/**"
+        - ".github/**"
+        - ".ci/**"
+        - "tools/**"
+
+  pull_request:
+    paths:
+        - ".github/build_sdk.yaml"
+        - "Build/**"
+        - "application/**"
+        - "NMSIS/**"
+        - "OS/**"
+        - "SoC/**"
+        - "test/**"
+        - ".github/**"
+        - ".ci/**"
+        - "tools/**"
+
+jobs:
+  build:
+    name: Build SDK
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+        soc: [evalsoc]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Caching tools
+      uses: actions/cache@v4
+      with:
+        path: |
+          prebuilt_tools/*.tar.bz2
+          prebuilt_tools/*.zip
+          prebuilt_tools/*.tar.gz
+        key: build
+
+    - name: Prepare Tools for Ubuntu
+      if: startsWith(matrix.os, 'ubuntu')
+      run: |
+          sudo apt-get -q update
+          sudo apt install -yq python3 python3-pip unzip libz-dev libssl-dev libglib2.0-dev libfdt-dev libpixman-1-dev zlib1g-dev libncursesw5-dev libncursesw5 libgmp-dev libmpfr-dev libmpc-dev
+          sudo python3 -m pip install -q --upgrade pip
+          # install to user local storage
+          # ERROR: Cannot uninstall 'pyserial'. It is a distutils installed project and thus we cannot accurately determine which files belong to it which would lead to only a partial uninstall.
+          pip3 install -q -r tools/scripts/requirements.txt
+          mkdir -p prebuilt_tools
+          export TOOLVER=2025.02
+          cd prebuilt_tools
+          echo "Prepare Nuclei Toolchain......"
+          toolzip=nuclei_riscv_newlibc_prebuilt_linux64_${TOOLVER}.tar.bz2
+          if [ ! -e $toolzip ] ; then
+            echo "Download Nuclei toolchain now!"
+            wget --progress=dot:giga --no-check-certificate https://download.nucleisys.com/upload/files/toolchain/gcc/$toolzip
+            ls -lh $toolzip
+            md5sum $toolzip
+          fi
+          tar -xjf $toolzip
+          echo "Prepare Nuclei QEMU......"
+          toolzip=nuclei-qemu-${TOOLVER}-linux-x64.tar.gz
+          if [ ! -e $toolzip ] ; then
+            echo "Download Nuclei qemu now!"
+            wget --progress=dot:giga --no-check-certificate https://download.nucleisys.com/upload/files/toolchain/qemu/$toolzip
+            ls -lh $toolzip
+            md5sum $toolzip
+          fi
+          tar -xzf $toolzip
+          if [ -d linux_qemu ] ; then
+            mv linux_qemu qemu
+          fi
+          echo "Check gcc and qemu version"
+          ldd ./qemu/bin/qemu-system-riscv32
+          ./qemu/bin/qemu-system-riscv32 --version
+          ./gcc/bin/riscv64-unknown-elf-gcc -v
+          cd ..
+          echo "NUCLEI_TOOL_ROOT=$(pwd)/prebuilt_tools" > setup_config.sh
+
+    - name: Build and Run SDK for Nuclei Eval SoC
+      if: matrix.soc == 'evalsoc'
+      run: |
+        echo "Setup build environment"
+        source setup.sh
+        export APPCFG=tools/scripts/nsdk_cli/configs/application.json
+        for hwcfg in "nuclei_fpga_eval_ci" ; do
+            export HWCFG=tools/scripts/nsdk_cli/configs/${hwcfg}.json
+            export LOGDIR=logs/${hwcfg}
+            echo "Build and run for ${hwcfg}"
+            python3 tools/scripts/nsdk_cli/nsdk_bench.py --appcfg $APPCFG --hwcfg $HWCFG --parallel="-j" --logdir $LOGDIR
+        done
+
+    - name: Upload Build Log for ${{ matrix.soc }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: build_${{ matrix.soc }}
+        path: |
+          logs/*

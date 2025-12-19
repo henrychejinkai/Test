@@ -1,0 +1,228 @@
+variables:
+  DOC_SERVER: doc
+  GIT_DEPTH: "3"
+  DOC_CENTER: /home/xl_ci/doc_center
+  SHAREENVLOC: /home/share/devtools
+  IMAGE: rego.corp.nucleisys.com/software/sdkbuild
+  IMAGE_TAG: "2025.02"
+  JOBCTRL: "RUN"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /draft|wip|stash/i
+      when: never
+    - if: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /master_n100|develop_n100/ && $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH =~ /master_n100|develop_n100/ && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH =~ /master_n100|develop_n100/
+    - if: $CI_COMMIT_BRANCH == "master_n100" && $CI_COMMIT_TAG
+
+default:
+  tags:
+    - env::docker
+    - net::outside
+  image: $IMAGE:$IMAGE_TAG
+
+stages:
+  - check
+  - build
+  - deploy
+
+## Job for build document
+build_doc:
+  stage: check
+  interruptible: true
+  only:
+    changes:
+      - doc/**/**/**/*
+      - .gitlab-ci.yml
+  retry: 1
+  artifacts:
+    name: "nuclei_n100_sdk_doc-job${CI_JOB_ID}-${CI_COMMIT_SHA::8}"
+    paths:
+      - doc/build
+    expire_in: 2 day
+  before_script:
+    - apt update
+    - apt install -y lftp python3 make latexmk texlive-base texlive-latex-extra python3-pip
+    - pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    - python3 -m pip install --upgrade pip
+    - pip3 install -r doc/requirements.txt
+  script:
+    - cd doc
+    - make clean
+    - make all
+    - make latexpdf
+    - cp build/latex/*.pdf build/html/
+
+## Job for deploy document to internal server
+deploy_doc:
+  stage: deploy
+  when: on_success
+  retry: 1
+  only:
+    refs:
+      - master_n100
+    changes:
+      - doc/**/**/**/**/*
+      - .gitlab-ci.yml
+  script:
+    - ssh $DOC_SERVER "rm -rf $DOC_CENTER/nuclei_sdk/*"
+    - ssh $DOC_SERVER "mkdir -p $DOC_CENTER/nuclei_sdk/"
+    - cd doc/build
+    - scp -r html $DOC_SERVER:$DOC_CENTER/nuclei_n100_sdk
+  dependencies:
+    - build_doc
+  tags:
+    - env::native
+    - host::whss1
+
+## Job for deploy document to nuclei website
+deploy_website:
+  stage: deploy
+  when: on_success
+  retry: 1
+  only:
+    refs:
+      - master_n100
+    changes:
+      - doc/**/**/**/**/*
+  script:
+    - ./.ci/ftp_deploy.sh $FTPUSER $FTPPWD $FTPSERVER doc/build/html nuclei_n100_sdk
+  dependencies:
+    - build_doc
+  tags:
+    - env::native
+    - host::whss1
+
+## Job template
+.job_template: &job_template_default
+  image: $IMAGE:$IMAGE_TAG
+  interruptible: true
+  stage: build
+  before_script:
+    - apt update
+    # install libncursesw5 for ubuntu 20.04 and later for libtinfo.so.5 missing
+    - apt install -y python3 make python3-pip libncursesw5
+    - pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    - python3 -m pip install --upgrade pip
+    - pip3 install -r tools/scripts/requirements.txt
+    - which riscv64-unknown-elf-gcc && riscv64-unknown-elf-gcc --version
+    - which riscv64-unknown-elf-clang && riscv64-unknown-elf-clang --version
+    - which qemu-system-riscv32 && qemu-system-riscv32 --version
+    - which make && make --version
+    - which python3 && python3 --version
+    # CI_JOB_NAME_SLUG is introduced >=15.4 gitlab release
+    - export CI_JOB_NAME_SHORT=${CI_JOB_NAME/[\[ :\/ ]*}
+    - echo "CI_JOB_NAME_SHORT=${CI_JOB_NAME_SHORT}"
+  artifacts:
+    when: always
+    name: "nsdkcli_logs-job${CI_JOB_ID}-${CI_COMMIT_SHA::8}"
+    paths:
+      - logs
+    expire_in: 2 day
+
+.job_ctrl_template: &job_ctrl_template_default
+  <<: *job_template_default
+  rules:
+    - if: $JOBCTRL == "RUN"
+
+build_evalsoc:
+  <<: *job_template_default
+  stage: check
+  variables:
+    APPCFG: tools/scripts/nsdk_cli/configs/application.json
+    HWCFG: tools/scripts/nsdk_cli/configs/nuclei_fpga_eval_ci.json
+  parallel:
+    matrix:
+      - DOWNLOAD: [ "sram" ]
+        ARCH_EXT: [ "", "_zca_zcb_zcmp_zcmt" ]
+        STDCLIB: ["newlib_small", "libncrt_small"]
+  script:
+    - export LOGDIR=logs/${CI_JOB_NAME_SHORT}/${STDCLIB}_${DOWNLOAD}${ARCH_EXT}
+    - python3 tools/scripts/nsdk_cli/nsdk_bench.py --appcfg $APPCFG --hwcfg $HWCFG --parallel="-j" --logdir $LOGDIR --make_options "STDCLIB=$STDCLIB DOWNLOAD=$DOWNLOAD ARCH_EXT=${ARCH_EXT}"
+
+sdk_gen_benchmark:
+  <<: *job_template_default
+  stage: check
+  script:
+    - export LOGROOT=gen
+    - export RUNTARGET=
+    - export SDK_COPY_OBJECTS="elf,map,dump"
+    - RUNMODE= bash tools/scripts/misc/dobench/dobench.sh $LOGROOT/default
+    - bash tools/scripts/misc/build_benchmark.sh
+  artifacts:
+    when: always
+    name: "n100_sdk_benchmark-job${CI_JOB_ID}-${CI_COMMIT_SHA::8}"
+    paths:
+      - gen
+    expire_in: 2 day
+
+# Job used to check all the npk.yml in this folder
+sdk_check_npk:
+  <<: *job_template_default
+  stage: check
+  script:
+    - echo "Validate and check npk.yml in this folder"
+    - python3 tools/scripts/nsdk_cli/check_npk.py -d .
+    - echo "npk.yml in this folder all PASS"
+
+# Job used to check all the json or yaml config files in this folder
+sdk_check_configfiles:
+  <<: *job_template_default
+  stage: check
+  script:
+    - echo "Validate and check config files in this folder"
+    - python3 tools/scripts/nsdk_cli/check_cfgfiles.py -d .
+    - echo "config files in this folder all PASS"
+
+run_evalsoc:
+  <<: *job_template_default
+  stage: build
+  variables:
+    APPCFG: tools/scripts/nsdk_cli/configs/application.json
+    HWCFG: tools/scripts/nsdk_cli/configs/nuclei_fpga_eval_ci_qemu.json
+  parallel:
+    matrix:
+      - DOWNLOAD: [ "sram" ]
+        TOOLCHAIN: ["nuclei_gnu", "nuclei_llvm"]
+        ARCH_EXT: [ "", "_zca_zcb_zcmp_zcmt" ]
+        STDCLIB: ["newlib_small", "libncrt_small"]
+  script:
+    - export LOGDIR=logs/${CI_JOB_NAME_SHORT}/${STDCLIB}_${DOWNLOAD}${ARCH_EXT}
+    - python3 tools/scripts/nsdk_cli/nsdk_bench.py --appcfg $APPCFG --hwcfg $HWCFG --parallel="-j" --logdir $LOGDIR --make_options "TOOLCHAIN=$TOOLCHAIN STDCLIB=$STDCLIB DOWNLOAD=$DOWNLOAD ARCH_EXT=${ARCH_EXT}" --run --run_target qemu
+
+run_evalsoc_zcc:
+  inherit:
+    default: false
+  interruptible: true
+  # workaround for zcc
+  allow_failure: true
+  stage: build
+  tags:
+    - env::shell
+    - net::outside
+    - host::whss1
+  timeout: 5h
+  variables:
+    APPCFG: tools/scripts/nsdk_cli/configs/application.json
+    HWCFG: tools/scripts/nsdk_cli/configs/nuclei_fpga_eval_ci_qemu.json
+  parallel:
+    matrix:
+      - DOWNLOAD: [ "sram" ]
+        TOOLCHAIN: ["nuclei_gnu", "nuclei_llvm"]
+        ARCH_EXT: [ "", "_zca_zcb_zcmp_zcmt" ]
+        STDCLIB: ["newlib_small"]
+  script:
+    - rm -rf logs
+    - source /home/share/devtools/env.sh
+    - activate_swdev
+    - export LOGDIR=logs/${CI_JOB_NAME_SHORT}/${STDCLIB}_${DOWNLOAD}${ARCH_EXT}
+    - export TOOLCHAIN=terapines
+    - python3 tools/scripts/nsdk_cli/nsdk_bench.py --appcfg $APPCFG --hwcfg $HWCFG --parallel="-j" --logdir $LOGDIR --make_options "TOOLCHAIN=$TOOLCHAIN STDCLIB=$STDCLIB DOWNLOAD=$DOWNLOAD ARCH_EXT=${ARCH_EXT}" --run --run_target qemu
+  artifacts:
+    when: always
+    name: "100_nsdkcli_logs-job${CI_JOB_ID}-${CI_COMMIT_SHA::8}"
+    paths:
+      - logs
+    expire_in: 2 day

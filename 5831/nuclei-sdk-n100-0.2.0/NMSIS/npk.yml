@@ -1,0 +1,28 @@
+## Package Base Information
+name: csp-n100_sdk_nmsis
+owner: nuclei
+version: 1.1.0
+description: NMSIS Modified For Nuclei N100 SDK
+type: csp
+keywords:
+  - nmsis
+  - risc-v
+  - nuclei
+license: Apache-2.0
+homepage: https://github.com/Nuclei-Software/NMSIS
+
+## Package Configurations
+configuration:
+  nmsislibarch:
+    value: "rv32imc"
+    type: text
+    global: false
+    description: RISC-V ARCH for NMSIS library
+
+## Source Code Management
+codemanage:
+  installdir: NMSIS
+  copyfiles:
+    - path: ["Core"]
+  incdirs:
+    - path: ["Core/Include"]
